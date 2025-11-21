@@ -104,27 +104,35 @@ const ensureCriticalSchema = async (connection) => {
 
     // Fix 1: Make legacy 'equipmentId' (camelCase) nullable if it exists to prevent "doesn't have a default value" error
     try {
-        // Try to modify directly. If it doesn't exist, it will throw, which we catch.
-        await connection.query("ALTER TABLE equipment_history MODIFY COLUMN equipmentId INT NULL");
-        console.log("Auto-repair: Modified equipmentId to be NULLABLE.");
+        const [camelCols] = await connection.query("SHOW COLUMNS FROM equipment_history LIKE 'equipmentId'");
+        if (camelCols.length > 0) {
+            console.log("Auto-repair: Making legacy column 'equipmentId' NULLABLE to fix Insert error.");
+            await connection.query("ALTER TABLE equipment_history MODIFY COLUMN equipmentId INT NULL");
+        }
     } catch (err) {
-        // console.error("Auto-repair note: equipmentId modification skipped (may not exist).");
+        console.error("Auto-repair warning for equipmentId:", err.message);
     }
 
     // Fix 2: Ensure 'timestamp' has a default value of CURRENT_TIMESTAMP to prevent "doesn't have a default value" error
     try {
-         await connection.query("ALTER TABLE equipment_history MODIFY COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP");
-         console.log("Auto-repair: Set default timestamp for equipment_history.");
+        const [tsCols] = await connection.query("SHOW COLUMNS FROM equipment_history LIKE 'timestamp'");
+        if (tsCols.length > 0) {
+             console.log("Auto-repair: Ensuring 'timestamp' has DEFAULT CURRENT_TIMESTAMP.");
+             await connection.query("ALTER TABLE equipment_history MODIFY COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP");
+        }
     } catch (err) {
-        console.error("Auto-repair error for timestamp equipment_history:", err.message);
+        console.error("Auto-repair warning for timestamp:", err.message);
     }
 
     // Fix 3: Ensure 'audit_log' timestamp also has default value
     try {
-         await connection.query("ALTER TABLE audit_log MODIFY COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP");
-         console.log("Auto-repair: Set default timestamp for audit_log.");
+        const [tsColsAudit] = await connection.query("SHOW COLUMNS FROM audit_log LIKE 'timestamp'");
+        if (tsColsAudit.length > 0) {
+             console.log("Auto-repair: Ensuring audit_log 'timestamp' has DEFAULT CURRENT_TIMESTAMP.");
+             await connection.query("ALTER TABLE audit_log MODIFY COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP");
+        }
     } catch (err) {
-        console.error("Auto-repair error for timestamp audit_log:", err.message);
+        console.error("Auto-repair warning for audit_log timestamp:", err.message);
     }
 
     console.log("Critical schema check complete.");
@@ -308,19 +316,19 @@ app.post('/api/login', async (req, res) => {
         if (!isPasswordValid) {
             return res.status(401).json({ message: 'Senha incorreta' });
         }
-
-        // Check if 2FA is mandatory
+        
+        // Check global settings to see if 2FA setup is required
         const [settingsRows] = await db.promise().query('SELECT config_value FROM app_config WHERE config_key = "require2fa"');
-        const require2fa = settingsRows.length > 0 && settingsRows[0].config_value === 'true';
+        const require2FA = settingsRows.length > 0 && settingsRows[0].config_value === 'true';
 
         await db.promise().query('UPDATE users SET lastLogin = NOW() WHERE id = ?', [user.id]);
         // Explicit timestamp NOW() for audit_log to fix potential "default value" errors
         await db.promise().query('INSERT INTO audit_log (username, action_type, target_type, target_id, details, timestamp) VALUES (?, ?, ?, ?, ?, NOW())', [username, 'LOGIN', 'USER', user.id, 'User logged in']);
         
         const { password: _, twoFASecret: __, ...userWithoutSensitiveData } = user;
-
-        // Add flag if setup is required
-        if (require2fa && !user.is2FAEnabled) {
+        
+        // Inform frontend if 2FA setup is required
+        if (require2FA && !user.is2FAEnabled) {
             userWithoutSensitiveData.requires2FASetup = true;
         }
 
@@ -1027,21 +1035,25 @@ app.post('/api/ai/generate-report', async (req, res) => {
     })));
 
     // SYSTEM PROMPT OTIMIZADO (FEW-SHOT LEARNING)
-    // A chave para modelos pequenos é dar exemplos claros do que você quer.
     const systemPrompt = `Você é um assistente especializado em filtragem de inventário JSON.
 Sua única tarefa é analisar o JSON fornecido e retornar os itens que correspondem à pergunta do usuário.
 
-REGRAS:
-1. Responda APENAS com um JSON válido no formato: { "reportData": [ ... ] }
-2. NÃO explique, NÃO converse, NÃO peça desculpas. Apenas JSON.
-3. Se nenhum item for encontrado, retorne { "reportData": [] }
+REGRAS CRÍTICAS:
+1. IGNORE totalmente maiúsculas/minúsculas (case-insensitive). "dell" = "Dell", "hp" = "HP".
+2. Faça busca parcial (substring). Ex: "notebook" deve encontrar "Notebook Dell Latitude".
+3. Responda APENAS com um JSON válido no formato: { "reportData": [ ... ] }
+4. NÃO explique, NÃO converse, NÃO peça desculpas. Apenas JSON.
+5. Se a pergunta for vaga (ex: "mostre tudo"), retorne os 20 primeiros itens.
+6. Se nenhum item for encontrado, retorne { "reportData": [] }
 
 EXEMPLOS:
 Usuário: "Mostre os notebooks da Dell"
-Resposta: { "reportData": [{"id": 1, "equip": "Notebook", "marca": "Dell", ...}] }
+Contexto: [{"id": 1, "equip": "Notebook Dell Latitude", "marca": "Dell"}, {"id": 2, "equip": "MacBook", "marca": "Apple"}]
+Resposta: { "reportData": [{"id": 1, "equip": "Notebook Dell Latitude", "marca": "Dell"}] }
 
-Usuário: "Quem está usando o equipamento X?"
-Resposta: { "reportData": [{"id": 5, "equip": "X", "user": "João", ...}] }
+Usuário: "quem usa o serial 123?"
+Contexto: [{"id": 5, "serial": "12345", "user": "João"}, {"id": 6, "serial": "999", "user": "Maria"}]
+Resposta: { "reportData": [{"id": 5, "serial": "12345", "user": "João"}] }
 
 Dados do Inventário:
 ${compactData}`;
@@ -1052,7 +1064,7 @@ ${compactData}`;
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 model: LOCAL_MODEL,
-                prompt: `Consulta: "${query}"`, // Prompt simples, o trabalho pesado está no system
+                prompt: `Consulta: "${query}"`, 
                 system: systemPrompt, 
                 stream: false,
                 format: "json",
