@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2');
@@ -6,6 +7,9 @@ const bcrypt = require('bcryptjs');
 const { authenticator } = require('otplib');
 const fs = require('fs');
 const path = require('path');
+// Removemos node-fetch nativo pois versões recentes do Node já possuem fetch, 
+// mas garantimos compatibilidade se necessário.
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const app = express();
 
@@ -23,6 +27,10 @@ const DB_HOST = process.env.DB_HOST;
 const DB_USER = process.env.DB_USER;
 const DB_PASSWORD = process.env.DB_PASSWORD;
 const DB_DATABASE = process.env.DB_DATABASE;
+
+// OLLAMA CONFIGURATION
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
+const LOCAL_MODEL = process.env.LOCAL_MODEL || 'qwen2.5:1.5b'; // Modelo leve recomendado
 
 // Backup directory
 const BACKUP_DIR = './backups';
@@ -925,7 +933,7 @@ app.post('/api/database/clear', async (req, res) => {
 
 
 // ------------------------------------------------------------------
-// 2FA & AI
+// 2FA & AI (OLLAMA)
 // ------------------------------------------------------------------
 
 app.post('/api/generate-2fa', async (req, res) => {
@@ -998,23 +1006,108 @@ app.post('/api/disable-user-2fa', async (req, res) => {
      }
 });
 
+// Endpoint para IA usando OLLAMA Local
 app.post('/api/ai/generate-report', async (req, res) => {
-    // Mock AI response for now or integrate with actual AI service
-    // Since I can't make external API calls in this environment to Gemini/HuggingFace directly,
-    // I'll return a placeholder. In production, you'd use fetch/axios here.
     const { query, data } = req.body;
-    
-    // Simple filter logic simulation for demo purposes
-    const lowerQuery = query.toLowerCase();
-    let filtered = data;
-    
-    if (lowerQuery.includes('dell')) {
-        filtered = data.filter(item => item.brand?.toLowerCase().includes('dell'));
-    } else if (lowerQuery.includes('estoque')) {
-        filtered = data.filter(item => item.status?.toLowerCase() === 'estoque');
+
+    if (!data || data.length === 0) {
+        return res.json({ reportData: [], message: "Nenhum dado disponível para análise." });
     }
+
+    // Preparar dados limitados para o contexto (se for muito grande, o modelo pequeno pode se perder)
+    // Para um modelo 1.5B, o contexto é limitado. Vamos enviar uma amostra ou tentar filtrar se possível.
+    // Mas para consultas genéricas, enviamos uma representação compacta.
+    const compactData = JSON.stringify(data.map(d => ({
+        id: d.id,
+        equip: d.equipamento,
+        user: d.usuarioAtual,
+        status: d.status,
+        setor: d.setor,
+        serial: d.serial,
+        marca: d.brand
+    })));
+
+    const systemPrompt = `Você é um assistente de inventário. Sua tarefa é analisar o JSON de inventário fornecido e retornar APENAS os itens que correspondem à consulta do usuário.
     
-    res.json({ reportData: filtered.slice(0, 10) }); // Limit to 10 for demo
+    IMPORTANTE:
+    1. Responda APENAS com um JSON válido no formato: { "reportData": [ ...lista de itens filtrados... ] }
+    2. Se a consulta pedir uma contagem, retorne os itens para que o frontend conte.
+    3. Se nenhum item for encontrado, retorne { "reportData": [] }
+    4. Não inclua texto adicional, apenas o JSON.
+    
+    Dados do Inventário:
+    ${compactData}
+    `;
+
+    try {
+        const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: LOCAL_MODEL,
+                prompt: `Consulta do usuário: "${query}"`,
+                system: systemPrompt,
+                stream: false,
+                format: "json", // Força saída JSON no Ollama
+                options: {
+                    temperature: 0.1, // Baixa criatividade para respostas mais precisas
+                    num_ctx: 4096 // Contexto maior se possível
+                }
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Ollama API error: ${response.statusText}`);
+        }
+
+        const result = await response.json();
+        
+        try {
+            const parsedResponse = JSON.parse(result.response);
+            
+            // Se o modelo retornou IDs ou dados parciais, precisamos mapear de volta para o objeto completo
+            // Mas como pedimos para retornar a lista, vamos tentar usar o que ele mandou se tiver IDs válidos.
+            // O frontend espera objetos Equipment completos.
+            
+            let finalData = [];
+            if (parsedResponse.reportData && Array.isArray(parsedResponse.reportData)) {
+                // Mapear de volta para o formato completo se necessário, ou confiar no que o modelo retornou se ele copiou os campos
+                // A melhor estratégia aqui é filtrar o array original 'data' baseado nos IDs retornados pela IA, se possível.
+                const resultIds = parsedResponse.reportData.map(r => r.id);
+                finalData = data.filter(d => resultIds.includes(d.id));
+                
+                // Se a filtragem por ID falhar (modelo alucinou IDs), tentamos usar o retorno dele se parecer válido
+                if (finalData.length === 0 && parsedResponse.reportData.length > 0) {
+                     // Tentar match por serial ou equipamento
+                     const resultSerials = parsedResponse.reportData.map(r => r.serial);
+                     finalData = data.filter(d => resultSerials.includes(d.serial));
+                }
+            }
+
+            res.json({ reportData: finalData });
+
+        } catch (parseError) {
+            console.error("Erro ao parsear resposta da IA:", result.response);
+            // Fallback: Tentar uma busca simples se a IA falhar
+            const lowerQuery = query.toLowerCase();
+            const fallbackData = data.filter(item => 
+                JSON.stringify(item).toLowerCase().includes(lowerQuery)
+            );
+            res.json({ reportData: fallbackData, warning: "IA falhou, usando filtro simples." });
+        }
+
+    } catch (error) {
+        console.error("Erro na comunicação com Ollama:", error);
+        // Fallback simples
+        const lowerQuery = query.toLowerCase();
+        const filtered = data.filter(item => 
+             (item.brand && item.brand.toLowerCase().includes(lowerQuery)) ||
+             (item.status && item.status.toLowerCase().includes(lowerQuery)) ||
+             (item.setor && item.setor.toLowerCase().includes(lowerQuery)) ||
+             (item.equipamento && item.equipamento.toLowerCase().includes(lowerQuery))
+        );
+        res.json({ reportData: filtered.slice(0, 50) });
+    }
 });
 
 
@@ -1022,4 +1115,5 @@ app.post('/api/ai/generate-report', async (req, res) => {
 app.listen(PORT, async () => {
     await runMigrations();
     console.log(`Server running on port ${PORT}`);
+    console.log(`Ollama Integration enabled. Ensure Ollama is running at ${OLLAMA_URL} with model ${LOCAL_MODEL}`);
 });

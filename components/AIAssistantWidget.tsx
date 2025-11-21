@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { getEquipment, generateAiReport } from '../services/apiService';
 import { Equipment, User } from '../types';
@@ -73,7 +74,7 @@ const AIAssistantWidget: React.FC<{ currentUser: User }> = ({ currentUser }) => 
             <button
                 onClick={() => setIsOpen(true)}
                 className="fixed bottom-6 right-6 bg-brand-primary text-white w-16 h-16 rounded-full shadow-lg flex items-center justify-center hover:bg-blue-700 transition-transform hover:scale-110 z-50"
-                title="Assistente de IA"
+                title="Assistente de IA Local"
             >
                 <Icon name="Bot" size={28} />
             </button>
@@ -86,7 +87,10 @@ const AIAssistantWidget: React.FC<{ currentUser: User }> = ({ currentUser }) => 
             <header className="flex items-center justify-between p-4 border-b dark:border-dark-border bg-gray-50 dark:bg-gray-900/50 rounded-t-xl">
                 <div className="flex items-center gap-3">
                     <Icon name="Bot" size={24} className="text-brand-primary" />
-                    <h3 className="text-lg font-bold text-brand-dark dark:text-dark-text-primary">Assistente de Relatórios</h3>
+                    <div>
+                        <h3 className="text-lg font-bold text-brand-dark dark:text-dark-text-primary">Assistente Local (Ollama)</h3>
+                        <p className="text-xs text-green-600 font-medium">Modelo Qwen 2.5 1.5B</p>
+                    </div>
                 </div>
                 <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-white">
                     <Icon name="X" size={24} />
@@ -125,6 +129,7 @@ const AIAssistantWidget: React.FC<{ currentUser: User }> = ({ currentUser }) => 
                         <Icon name="Lightbulb" size={32} className="mx-auto text-yellow-400 mb-2"/>
                         <p>Faça uma pergunta sobre o inventário.</p>
                         <p className="text-xs mt-2">Ex: "Quais notebooks Dell estão em estoque?"</p>
+                        <p className="text-xs mt-2 text-gray-400">Rodando Localmente com Ollama</p>
                     </div>
                 )}
             </div>
