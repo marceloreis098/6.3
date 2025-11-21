@@ -29,7 +29,7 @@ const DB_DATABASE = process.env.DB_DATABASE;
 
 // OLLAMA CONFIGURATION
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
-const LOCAL_MODEL = process.env.LOCAL_MODEL || 'qwen2.5:1.5b'; // Modelo leve recomendado
+const LOCAL_MODEL = process.env.LOCAL_MODEL || 'llama3.2'; // Modelo Llama 3.2 (3B) - Mais inteligente e robusto
 
 // Backup directory
 const BACKUP_DIR = './backups';
@@ -1015,7 +1015,7 @@ app.post('/api/disable-user-2fa', async (req, res) => {
      }
 });
 
-// Endpoint para IA usando OLLAMA Local
+// Endpoint para IA usando OLLAMA Local - HYBRID SEARCH (Smart Extraction + Code Filtering)
 app.post('/api/ai/generate-report', async (req, res) => {
     const { query, data } = req.body;
 
@@ -1023,40 +1023,42 @@ app.post('/api/ai/generate-report', async (req, res) => {
         return res.json({ reportData: [], message: "Nenhum dado disponível para análise." });
     }
 
-    // Otimização de Contexto: Enviamos apenas campos relevantes para economizar tokens e reduzir ruído
-    const compactData = JSON.stringify(data.map(d => ({
-        id: d.id,
-        equip: d.equipamento,
-        user: d.usuarioAtual,
-        status: d.status,
-        setor: d.setor,
-        serial: d.serial,
-        marca: d.brand
-    })));
+    // 1. Prepare metadata summaries for the LLM (Available Options)
+    const uniqueBrands = [...new Set(data.map(d => d.brand).filter(Boolean))].join(', ');
+    const uniqueStatuses = [...new Set(data.map(d => d.status).filter(Boolean))].join(', ');
+    // Limit sectors/users to avoid context overflow if too many, or just sample top 20
+    const uniqueSetores = [...new Set(data.map(d => d.setor).filter(Boolean))].slice(0, 50).join(', ');
+    
+    // SYSTEM PROMPT OTIMIZADO PARA LLAMA 3.2 (JSON Extraction Focus)
+    const systemPrompt = `You are an expert data query generator. Your ONLY job is to extract search criteria from a natural language query into a JSON object.
+    
+AVAILABLE METADATA:
+- Brands: ${uniqueBrands}
+- Statuses: ${uniqueStatuses}
+- Sectors: ${uniqueSetores}
 
-    // SYSTEM PROMPT OTIMIZADO (FEW-SHOT LEARNING)
-    const systemPrompt = `Você é um assistente especializado em filtragem de inventário JSON.
-Sua única tarefa é analisar o JSON fornecido e retornar os itens que correspondem à pergunta do usuário.
+RULES:
+1. Output MUST be valid JSON. No markdown, no explanations.
+2. Extract the following fields if present:
+   - "keyword": General search term (e.g., "notebook", "monitor")
+   - "brand": Brand name (e.g., "Dell", "HP")
+   - "status": Status (e.g., "Estoque", "Em Uso")
+   - "user": User name or part of it
+   - "serial": Serial number
+   - "setor": Sector/Department
+3. If a field is not mentioned, do NOT include it in the JSON.
+4. If the query implies "all" or "list", just extract criteria. If no criteria, return empty JSON {}.
 
-REGRAS CRÍTICAS:
-1. IGNORE totalmente maiúsculas/minúsculas (case-insensitive). "dell" = "Dell", "hp" = "HP".
-2. Faça busca parcial (substring). Ex: "notebook" deve encontrar "Notebook Dell Latitude".
-3. Responda APENAS com um JSON válido no formato: { "reportData": [ ... ] }
-4. NÃO explique, NÃO converse, NÃO peça desculpas. Apenas JSON.
-5. Se a pergunta for vaga (ex: "mostre tudo"), retorne os 20 primeiros itens.
-6. Se nenhum item for encontrado, retorne { "reportData": [] }
+EXAMPLES:
+User: "Show me all Dell laptops in Stock"
+JSON: {"brand": "Dell", "keyword": "laptop", "status": "Estoque"}
 
-EXEMPLOS:
-Usuário: "Mostre os notebooks da Dell"
-Contexto: [{"id": 1, "equip": "Notebook Dell Latitude", "marca": "Dell"}, {"id": 2, "equip": "MacBook", "marca": "Apple"}]
-Resposta: { "reportData": [{"id": 1, "equip": "Notebook Dell Latitude", "marca": "Dell"}] }
+User: "Who has the serial 12345?"
+JSON: {"serial": "12345"}
 
-Usuário: "quem usa o serial 123?"
-Contexto: [{"id": 5, "serial": "12345", "user": "João"}, {"id": 6, "serial": "999", "user": "Maria"}]
-Resposta: { "reportData": [{"id": 5, "serial": "12345", "user": "João"}] }
-
-Dados do Inventário:
-${compactData}`;
+User: "Equipment for João in IT"
+JSON: {"user": "João", "setor": "IT"}
+`;
 
     try {
         const response = await fetch(`${OLLAMA_URL}/api/generate`, {
@@ -1064,15 +1066,13 @@ ${compactData}`;
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 model: LOCAL_MODEL,
-                prompt: `Consulta: "${query}"`, 
+                prompt: `Query: "${query}"`, 
                 system: systemPrompt, 
                 stream: false,
                 format: "json",
                 options: {
-                    temperature: 0, // ZERO para máxima precisão e determinismo
-                    num_ctx: 4096,  // Contexto maior para caber os dados
-                    top_k: 20,      // Reduz a aleatoriedade na escolha de tokens
-                    top_p: 0.5      // Foca nas respostas mais prováveis
+                    temperature: 0.1, // Low temp for precision
+                    num_ctx: 4096
                 }
             })
         });
@@ -1083,36 +1083,57 @@ ${compactData}`;
 
         const result = await response.json();
         
+        // 2. Parse Criteria
+        let criteria = {};
         try {
-            // Tentativa de limpar a resposta caso o modelo seja "falador" antes do JSON
             let jsonString = result.response;
             const firstBracket = jsonString.indexOf('{');
             const lastBracket = jsonString.lastIndexOf('}');
             if (firstBracket !== -1 && lastBracket !== -1) {
                 jsonString = jsonString.substring(firstBracket, lastBracket + 1);
             }
+            criteria = JSON.parse(jsonString);
+            console.log("AI Extracted Criteria:", criteria);
+        } catch (e) {
+            console.error("Failed to parse AI JSON response", e);
+            // Fallback to simple text search if JSON fails
+            criteria = { keyword: query }; 
+        }
 
-            const parsedResponse = JSON.parse(jsonString);
-            
-            // Reconstrução dos objetos completos baseados nos IDs retornados pela IA
-            let finalData = [];
-            if (parsedResponse.reportData && Array.isArray(parsedResponse.reportData)) {
-                const resultIds = parsedResponse.reportData.map(r => r.id);
-                // Filtra o array original 'data' (que tem todos os campos) usando os IDs que a IA selecionou
-                finalData = data.filter(d => resultIds.includes(d.id));
+        // 3. Execute Filter Logic (Node.js) - Robust Case-Insensitive Search
+        const filteredData = data.filter(item => {
+            let match = true;
+
+            if (criteria.brand) {
+                match = match && (item.brand && item.brand.toLowerCase().includes(criteria.brand.toLowerCase()));
+            }
+            if (criteria.status) {
+                match = match && (item.status && item.status.toLowerCase().includes(criteria.status.toLowerCase()));
+            }
+            if (criteria.user) {
+                match = match && (item.usuarioAtual && item.usuarioAtual.toLowerCase().includes(criteria.user.toLowerCase()));
+            }
+            if (criteria.serial) {
+                match = match && (item.serial && item.serial.toLowerCase().includes(criteria.serial.toLowerCase()));
+            }
+            if (criteria.setor) {
+                match = match && (item.setor && item.setor.toLowerCase().includes(criteria.setor.toLowerCase()));
+            }
+            if (criteria.keyword) {
+                const kw = criteria.keyword.toLowerCase();
+                // Check common fields for generic keyword
+                const keywordMatch = (
+                    (item.equipamento && item.equipamento.toLowerCase().includes(kw)) ||
+                    (item.tipo && item.tipo.toLowerCase().includes(kw)) ||
+                    (item.model && item.model.toLowerCase().includes(kw))
+                );
+                match = match && keywordMatch;
             }
 
-            res.json({ reportData: finalData });
+            return match;
+        });
 
-        } catch (parseError) {
-            console.error("Erro ao parsear resposta da IA:", result.response);
-            // Fallback Robusto: Busca textual simples se a IA falhar no JSON
-            const lowerQuery = query.toLowerCase();
-            const fallbackData = data.filter(item => 
-                JSON.stringify(item).toLowerCase().includes(lowerQuery)
-            );
-            res.json({ reportData: fallbackData, warning: "IA falhou no formato, usando filtro de texto." });
-        }
+        res.json({ reportData: filteredData });
 
     } catch (error) {
         console.error("Erro na comunicação com Ollama:", error);

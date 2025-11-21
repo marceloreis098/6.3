@@ -89,7 +89,7 @@ const AIAssistantWidget: React.FC<{ currentUser: User }> = ({ currentUser }) => 
                     <Icon name="Bot" size={24} className="text-brand-primary" />
                     <div>
                         <h3 className="text-lg font-bold text-brand-dark dark:text-dark-text-primary">Assistente Local (Ollama)</h3>
-                        <p className="text-xs text-green-600 font-medium">Modelo Qwen 2.5 1.5B</p>
+                        <p className="text-xs text-green-600 font-medium">Modelo Llama 3.2 3B</p>
                     </div>
                 </div>
                 <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-white">
