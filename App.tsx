@@ -10,7 +10,7 @@ import AuditLog from './components/AuditLog';
 import Login from './components/Login';
 import TwoFactorAuth from './components/TwoFactorAuth';
 import TwoFactorSetup from './components/TwoFactorSetup'; // Novo componente
-import { Page, User, UserRole } from './types';
+import { Page, User, UserRole, AppSettings } from './types'; // Import AppSettings type
 import { getSettings } from './services/apiService';
 import AIAssistantWidget from './components/AIAssistantWidget';
 
@@ -23,7 +23,9 @@ const App: React.FC = () => {
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [companyName, setCompanyName] = useState('MRR INFORMATICA');
   const [isSsoEnabled, setIsSsoEnabled] = useState(false);
+  const [globalSettings, setGlobalSettings] = useState<Partial<AppSettings>>({});
 
+  // 1. Carrega usuário do localStorage
   useEffect(() => {
     const savedUser = localStorage.getItem('currentUser');
     if (savedUser) {
@@ -41,9 +43,11 @@ const App: React.FC = () => {
     }
   }, []);
   
+  // 2. Busca configurações globais
   const fetchSettings = useCallback(async () => {
         try {
             const settings = await getSettings();
+            setGlobalSettings(settings);
             setCompanyName(settings.companyName || 'MRR INFORMATICA');
             setIsSsoEnabled(settings.isSsoEnabled || false);
         } catch (error) {
@@ -54,6 +58,16 @@ const App: React.FC = () => {
     useEffect(() => {
         fetchSettings();
     }, [fetchSettings]);
+
+    // 3. Validação de Segurança: Força setup de 2FA se obrigatório globalmente e não configurado pelo usuário (mesmo se já logado via localStorage)
+    useEffect(() => {
+        if (currentUser && globalSettings.require2fa && !currentUser.is2FAEnabled && !userFor2FASetup) {
+            // Se o usuário já está logado (ex: localStorage), mas o 2FA é obrigatório e ele não tem
+            // Forçamos o fluxo de setup
+            setUserFor2FASetup(currentUser);
+            setCurrentUser(null); // Remove da tela principal para não vazar dados
+        }
+    }, [currentUser, globalSettings.require2fa, userFor2FASetup]);
 
 
   const handleLoginSuccess = (user: User & { requires2FASetup?: boolean }) => {

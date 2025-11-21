@@ -317,11 +317,21 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ message: 'Senha incorreta' });
         }
 
+        // Check if 2FA is mandatory
+        const [settingsRows] = await db.promise().query('SELECT config_value FROM app_config WHERE config_key = "require2fa"');
+        const require2fa = settingsRows.length > 0 && settingsRows[0].config_value === 'true';
+
         await db.promise().query('UPDATE users SET lastLogin = NOW() WHERE id = ?', [user.id]);
         // Explicit timestamp NOW() for audit_log to fix potential "default value" errors
         await db.promise().query('INSERT INTO audit_log (username, action_type, target_type, target_id, details, timestamp) VALUES (?, ?, ?, ?, ?, NOW())', [username, 'LOGIN', 'USER', user.id, 'User logged in']);
         
         const { password: _, twoFASecret: __, ...userWithoutSensitiveData } = user;
+
+        // Add flag if setup is required
+        if (require2fa && !user.is2FAEnabled) {
+            userWithoutSensitiveData.requires2FASetup = true;
+        }
+
         res.json(userWithoutSensitiveData);
     } catch (error) {
         res.status(500).json({ message: error.message });
