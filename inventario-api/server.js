@@ -104,35 +104,27 @@ const ensureCriticalSchema = async (connection) => {
 
     // Fix 1: Make legacy 'equipmentId' (camelCase) nullable if it exists to prevent "doesn't have a default value" error
     try {
-        const [camelCols] = await connection.query("SHOW COLUMNS FROM equipment_history LIKE 'equipmentId'");
-        if (camelCols.length > 0) {
-            console.log("Auto-repair: Making legacy column 'equipmentId' NULLABLE to fix Insert error.");
-            await connection.query("ALTER TABLE equipment_history MODIFY COLUMN equipmentId INT NULL");
-        }
+        // Try to modify directly. If it doesn't exist, it will throw, which we catch.
+        await connection.query("ALTER TABLE equipment_history MODIFY COLUMN equipmentId INT NULL");
+        console.log("Auto-repair: Modified equipmentId to be NULLABLE.");
     } catch (err) {
-        console.error("Auto-repair warning for equipmentId:", err.message);
+        // console.error("Auto-repair note: equipmentId modification skipped (may not exist).");
     }
 
     // Fix 2: Ensure 'timestamp' has a default value of CURRENT_TIMESTAMP to prevent "doesn't have a default value" error
     try {
-        const [tsCols] = await connection.query("SHOW COLUMNS FROM equipment_history LIKE 'timestamp'");
-        if (tsCols.length > 0) {
-             console.log("Auto-repair: Ensuring 'timestamp' has DEFAULT CURRENT_TIMESTAMP.");
-             await connection.query("ALTER TABLE equipment_history MODIFY COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP");
-        }
+         await connection.query("ALTER TABLE equipment_history MODIFY COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP");
+         console.log("Auto-repair: Set default timestamp for equipment_history.");
     } catch (err) {
-        console.error("Auto-repair warning for timestamp:", err.message);
+        console.error("Auto-repair error for timestamp equipment_history:", err.message);
     }
 
     // Fix 3: Ensure 'audit_log' timestamp also has default value
     try {
-        const [tsColsAudit] = await connection.query("SHOW COLUMNS FROM audit_log LIKE 'timestamp'");
-        if (tsColsAudit.length > 0) {
-             console.log("Auto-repair: Ensuring audit_log 'timestamp' has DEFAULT CURRENT_TIMESTAMP.");
-             await connection.query("ALTER TABLE audit_log MODIFY COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP");
-        }
+         await connection.query("ALTER TABLE audit_log MODIFY COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP");
+         console.log("Auto-repair: Set default timestamp for audit_log.");
     } catch (err) {
-        console.error("Auto-repair warning for audit_log timestamp:", err.message);
+        console.error("Auto-repair error for timestamp audit_log:", err.message);
     }
 
     console.log("Critical schema check complete.");
