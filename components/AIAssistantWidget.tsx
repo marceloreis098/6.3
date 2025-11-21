@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { getEquipment, generateAiReport } from '../services/apiService';
 import { Equipment, User } from '../types';
@@ -89,7 +88,7 @@ const AIAssistantWidget: React.FC<{ currentUser: User }> = ({ currentUser }) => 
                     <Icon name="Bot" size={24} className="text-brand-primary" />
                     <div>
                         <h3 className="text-lg font-bold text-brand-dark dark:text-dark-text-primary">Assistente Local (Ollama)</h3>
-                        <p className="text-xs text-green-600 font-medium">Modelo Llama 3.2 3B</p>
+                        <p className="text-xs text-green-600 font-medium">Modelo Llama 3.2 (Busca Híbrida)</p>
                     </div>
                 </div>
                 <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-white">
@@ -110,10 +109,13 @@ const AIAssistantWidget: React.FC<{ currentUser: User }> = ({ currentUser }) => 
                             <div className="space-y-3">
                                 {report.map(item => (
                                     <div key={item.id} className="p-3 bg-gray-50 dark:bg-dark-bg border dark:border-dark-border rounded-lg text-xs">
-                                        <p className="font-bold">{item.equipamento}</p>
-                                        <p><strong>Usuário:</strong> {item.usuarioAtual || 'N/A'}</p>
-                                        <p><strong>Serial:</strong> {item.serial || 'N/A'}</p>
-                                        <p><strong>Status:</strong> {item.status}</p>
+                                        <p className="font-bold text-sm">{item.equipamento}</p>
+                                        <div className="grid grid-cols-2 gap-1 mt-1 text-gray-600 dark:text-gray-300">
+                                            <p><strong>Usuário:</strong> {item.usuarioAtual || 'N/A'}</p>
+                                            <p><strong>Serial:</strong> {item.serial || 'N/A'}</p>
+                                            <p><strong>Marca:</strong> {item.brand || 'N/A'}</p>
+                                            <p><strong>Status:</strong> <span className="px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded-full text-[10px]">{item.status}</span></p>
+                                        </div>
                                     </div>
                                 ))}
                             </div>
@@ -121,6 +123,7 @@ const AIAssistantWidget: React.FC<{ currentUser: User }> = ({ currentUser }) => 
                             <div className="text-center py-6 text-gray-500 dark:text-dark-text-secondary">
                                 <Icon name="SearchX" size={32} className="mx-auto text-gray-400 mb-2" />
                                 <p>Nenhum resultado encontrado.</p>
+                                <p className="text-xs mt-2">Tente simplificar sua busca (ex: "Dell" em vez de "quais são os dells").</p>
                             </div>
                         )}
                     </div>
@@ -129,7 +132,7 @@ const AIAssistantWidget: React.FC<{ currentUser: User }> = ({ currentUser }) => 
                         <Icon name="Lightbulb" size={32} className="mx-auto text-yellow-400 mb-2"/>
                         <p>Faça uma pergunta sobre o inventário.</p>
                         <p className="text-xs mt-2">Ex: "Quais notebooks Dell estão em estoque?"</p>
-                        <p className="text-xs mt-2 text-gray-400">Rodando Localmente com Ollama</p>
+                        <p className="text-xs mt-2">Ex: "O que está com o Marcelo?"</p>
                     </div>
                 )}
             </div>
