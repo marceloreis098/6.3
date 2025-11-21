@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2');
@@ -1014,9 +1013,7 @@ app.post('/api/ai/generate-report', async (req, res) => {
         return res.json({ reportData: [], message: "Nenhum dado disponível para análise." });
     }
 
-    // Preparar dados limitados para o contexto (se for muito grande, o modelo pequeno pode se perder)
-    // Para um modelo 1.5B, o contexto é limitado. Vamos enviar uma amostra ou tentar filtrar se possível.
-    // Mas para consultas genéricas, enviamos uma representação compacta.
+    // Otimização de Contexto: Enviamos apenas campos relevantes para economizar tokens e reduzir ruído
     const compactData = JSON.stringify(data.map(d => ({
         id: d.id,
         equip: d.equipamento,
@@ -1027,17 +1024,25 @@ app.post('/api/ai/generate-report', async (req, res) => {
         marca: d.brand
     })));
 
-    const systemPrompt = `Você é um assistente de inventário. Sua tarefa é analisar o JSON de inventário fornecido e retornar APENAS os itens que correspondem à consulta do usuário.
-    
-    IMPORTANTE:
-    1. Responda APENAS com um JSON válido no formato: { "reportData": [ ...lista de itens filtrados... ] }
-    2. Se a consulta pedir uma contagem, retorne os itens para que o frontend conte.
-    3. Se nenhum item for encontrado, retorne { "reportData": [] }
-    4. Não inclua texto adicional, apenas o JSON.
-    
-    Dados do Inventário:
-    ${compactData}
-    `;
+    // SYSTEM PROMPT OTIMIZADO (FEW-SHOT LEARNING)
+    // A chave para modelos pequenos é dar exemplos claros do que você quer.
+    const systemPrompt = `Você é um assistente especializado em filtragem de inventário JSON.
+Sua única tarefa é analisar o JSON fornecido e retornar os itens que correspondem à pergunta do usuário.
+
+REGRAS:
+1. Responda APENAS com um JSON válido no formato: { "reportData": [ ... ] }
+2. NÃO explique, NÃO converse, NÃO peça desculpas. Apenas JSON.
+3. Se nenhum item for encontrado, retorne { "reportData": [] }
+
+EXEMPLOS:
+Usuário: "Mostre os notebooks da Dell"
+Resposta: { "reportData": [{"id": 1, "equip": "Notebook", "marca": "Dell", ...}] }
+
+Usuário: "Quem está usando o equipamento X?"
+Resposta: { "reportData": [{"id": 5, "equip": "X", "user": "João", ...}] }
+
+Dados do Inventário:
+${compactData}`;
 
     try {
         const response = await fetch(`${OLLAMA_URL}/api/generate`, {
@@ -1045,13 +1050,15 @@ app.post('/api/ai/generate-report', async (req, res) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 model: LOCAL_MODEL,
-                prompt: `Consulta do usuário: "${query}"`,
-                system: systemPrompt,
+                prompt: `Consulta: "${query}"`, // Prompt simples, o trabalho pesado está no system
+                system: systemPrompt, 
                 stream: false,
-                format: "json", // Força saída JSON no Ollama
+                format: "json",
                 options: {
-                    temperature: 0.1, // Baixa criatividade para respostas mais precisas
-                    num_ctx: 4096 // Contexto maior se possível
+                    temperature: 0, // ZERO para máxima precisão e determinismo
+                    num_ctx: 4096,  // Contexto maior para caber os dados
+                    top_k: 20,      // Reduz a aleatoriedade na escolha de tokens
+                    top_p: 0.5      // Foca nas respostas mais prováveis
                 }
             })
         });
@@ -1063,50 +1070,39 @@ app.post('/api/ai/generate-report', async (req, res) => {
         const result = await response.json();
         
         try {
-            const parsedResponse = JSON.parse(result.response);
+            // Tentativa de limpar a resposta caso o modelo seja "falador" antes do JSON
+            let jsonString = result.response;
+            const firstBracket = jsonString.indexOf('{');
+            const lastBracket = jsonString.lastIndexOf('}');
+            if (firstBracket !== -1 && lastBracket !== -1) {
+                jsonString = jsonString.substring(firstBracket, lastBracket + 1);
+            }
+
+            const parsedResponse = JSON.parse(jsonString);
             
-            // Se o modelo retornou IDs ou dados parciais, precisamos mapear de volta para o objeto completo
-            // Mas como pedimos para retornar a lista, vamos tentar usar o que ele mandou se tiver IDs válidos.
-            // O frontend espera objetos Equipment completos.
-            
+            // Reconstrução dos objetos completos baseados nos IDs retornados pela IA
             let finalData = [];
             if (parsedResponse.reportData && Array.isArray(parsedResponse.reportData)) {
-                // Mapear de volta para o formato completo se necessário, ou confiar no que o modelo retornou se ele copiou os campos
-                // A melhor estratégia aqui é filtrar o array original 'data' baseado nos IDs retornados pela IA, se possível.
                 const resultIds = parsedResponse.reportData.map(r => r.id);
+                // Filtra o array original 'data' (que tem todos os campos) usando os IDs que a IA selecionou
                 finalData = data.filter(d => resultIds.includes(d.id));
-                
-                // Se a filtragem por ID falhar (modelo alucinou IDs), tentamos usar o retorno dele se parecer válido
-                if (finalData.length === 0 && parsedResponse.reportData.length > 0) {
-                     // Tentar match por serial ou equipamento
-                     const resultSerials = parsedResponse.reportData.map(r => r.serial);
-                     finalData = data.filter(d => resultSerials.includes(d.serial));
-                }
             }
 
             res.json({ reportData: finalData });
 
         } catch (parseError) {
             console.error("Erro ao parsear resposta da IA:", result.response);
-            // Fallback: Tentar uma busca simples se a IA falhar
+            // Fallback Robusto: Busca textual simples se a IA falhar no JSON
             const lowerQuery = query.toLowerCase();
             const fallbackData = data.filter(item => 
                 JSON.stringify(item).toLowerCase().includes(lowerQuery)
             );
-            res.json({ reportData: fallbackData, warning: "IA falhou, usando filtro simples." });
+            res.json({ reportData: fallbackData, warning: "IA falhou no formato, usando filtro de texto." });
         }
 
     } catch (error) {
         console.error("Erro na comunicação com Ollama:", error);
-        // Fallback simples
-        const lowerQuery = query.toLowerCase();
-        const filtered = data.filter(item => 
-             (item.brand && item.brand.toLowerCase().includes(lowerQuery)) ||
-             (item.status && item.status.toLowerCase().includes(lowerQuery)) ||
-             (item.setor && item.setor.toLowerCase().includes(lowerQuery)) ||
-             (item.equipamento && item.equipamento.toLowerCase().includes(lowerQuery))
-        );
-        res.json({ reportData: filtered.slice(0, 50) });
+        res.status(500).json({ error: "Falha ao comunicar com a IA local." });
     }
 });
 
